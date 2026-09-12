@@ -1,3 +1,5 @@
+# Public, non-secret config only. Never put API keys, tokens, or TURN credentials here.
+# Runtime secrets belong in the Render dashboard or GitHub environment "production".
 services:
   - type: web
     name: pairdrop
@@ -16,3 +18,5 @@ services:
         value: "false"
       - key: WS_FALLBACK
         value: "false"
+      - key: RTC_CONFIG
+        sync: false

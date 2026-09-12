@@ -1,0 +1,48 @@
+name: Render deploy
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: pairdrop-render
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'AhtishamHussain/PairDrop'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - name: Trigger Render deploy
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          if [ -z "${RENDER_API_KEY}" ] || [ -z "${RENDER_SERVICE_ID}" ]; then
+            echo "Missing GitHub environment secrets RENDER_API_KEY and/or RENDER_SERVICE_ID."
+            echo "Add them under Settings → Environments → production. Do not commit them."
+            exit 1
+          fi
+          CODE="$(curl -sS -o /tmp/render-deploy.json -w "%{http_code}" \
+            -X POST "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/deploys" \
+            -H "Authorization: Bearer ${RENDER_API_KEY}" \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -d '{"clearCache":"do_not_clear"}')"
+          echo "render_http_status=${CODE}"
+          python3 - << 'PY'
+          import json, pathlib
+          raw = pathlib.Path("/tmp/render-deploy.json").read_text(encoding="utf-8")
+          try:
+              data = json.loads(raw)
+          except json.JSONDecodeError:
+              raise SystemExit("Render returned a non-JSON body")
+          deploy = data.get("deploy") or data
+          print("render_deploy_id=", deploy.get("id", "unknown"))
+          print("render_status=", deploy.get("status", "unknown"))
+          PY
+          test "$CODE" -ge 200 && test "$CODE" -lt 300
