@@ -1,0 +1,108 @@
+name: AWS production
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - "docs/**"
+      - "LICENSE"
+      - "**/*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: pairdrop-production
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  build-and-deploy:
+    if: github.repository == 'AhtishamHussain/PairDrop'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: eu-north-1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: pairdrop-github
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076 # v2.0.1
+
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker build --pull -f Dockerfile.aws -t "$REGISTRY/pairdrop:$TAG" -t "$REGISTRY/pairdrop:latest" .
+          docker push "$REGISTRY/pairdrop:$TAG"
+          docker push "$REGISTRY/pairdrop:latest"
+          aws ssm put-parameter --name /pairdrop/image_tag --type String --value "$TAG" --overwrite
+
+      - name: Deploy via SSM with health rollback
+        env:
+          TAG: ${{ github.sha }}
+        run: |
+          INSTANCE_ID=""
+          for i in $(seq 1 30); do
+            INSTANCE_ID="$(aws ec2 describe-instances \
+              --filters "Name=tag:Name,Values=pairdrop" "Name=instance-state-name,Values=running" \
+              --query 'Reservations[0].Instances[0].InstanceId' --output text)"
+            if [ -n "$INSTANCE_ID" ] && [ "$INSTANCE_ID" != "None" ]; then
+              if aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$INSTANCE_ID" --query 'InstanceInformationList[0].PingStatus' --output text | grep -q Online; then
+                break
+              fi
+            fi
+            echo "Waiting for instance/SSM..."
+            INSTANCE_ID=""
+            sleep 20
+          done
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "No running PairDrop instance with SSM. Run the AWS terraform workflow first."
+            exit 1
+          fi
+          COMMAND_ID="$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --comment "PairDrop deploy $TAG" \
+            --timeout-seconds 300 \
+            --parameters commands='["/opt/pairdrop/update.sh"]' \
+            --query Command.CommandId --output text)"
+          aws ssm wait command-executed --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID"
+          STATUS="$(aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --query Status --output text)"
+          aws ssm get-command-invocation --command-id "$COMMAND_ID" --instance-id "$INSTANCE_ID" --query StandardOutputContent --output text
+          test "$STATUS" = "Success"
+
+      - name: Optional Cloudflare DNS
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ZONE_ID" ] || [ -z "$DOMAIN" ]; then
+            echo "Cloudflare secrets not set; skipping DNS update"
+            exit 0
+          fi
+          EIP="$(aws ec2 describe-addresses --filters Name=tag:Name,Values=pairdrop-eip --query 'Addresses[0].PublicIp' --output text)"
+          RECORD_ID="$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records?type=A&name=$DOMAIN" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["result"][0]["id"] if d.get("result") else "")')"
+          BODY=$(printf '{"type":"A","name":"%s","content":"%s","ttl":60,"proxied":true}' "$DOMAIN" "$EIP")
+          if [ -n "$RECORD_ID" ]; then
+            curl -fsS -X PUT "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records/$RECORD_ID" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" --data "$BODY"
+          else
+            curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" --data "$BODY"
+          fi

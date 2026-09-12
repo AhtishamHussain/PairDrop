@@ -6,6 +6,8 @@ docs
 licenses
 node_modules
 pairdrop-cli
+infra
+deploy
 *.md
 *.yml
 Dockerfile

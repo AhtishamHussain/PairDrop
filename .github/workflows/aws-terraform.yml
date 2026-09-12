@@ -1,0 +1,61 @@
+name: AWS terraform
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  apply:
+    if: github.repository == 'AhtishamHussain/PairDrop'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+    env:
+      AWS_REGION: eu-north-1
+      TF_IN_AUTOMATION: "true"
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-north-1
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: Ensure encrypted private Terraform state bucket
+        run: |
+          ACCOUNT="$(aws sts get-caller-identity --query Account --output text)"
+          BUCKET="pairdrop-tfstate-${ACCOUNT}"
+          if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
+            aws s3api create-bucket --bucket "$BUCKET" --region "$AWS_REGION" \
+              --create-bucket-configuration LocationConstraint="$AWS_REGION"
+          fi
+          aws s3api put-public-access-block --bucket "$BUCKET" \
+            --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+          aws s3api put-bucket-encryption --bucket "$BUCKET" \
+            --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+          aws s3api put-bucket-versioning --bucket "$BUCKET" --versioning-configuration Status=Enabled
+          echo "TF_BUCKET=$BUCKET" >> "$GITHUB_ENV"
+
+      - name: Terraform apply
+        working-directory: infra/aws
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          terraform init -input=false \
+            -backend-config="bucket=${TF_BUCKET}" \
+            -backend-config="key=pairdrop/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true"
+          terraform apply -input=false -auto-approve \
+            -var="aws_region=${AWS_REGION}" \
+            -var="github_org=${GITHUB_REPOSITORY_OWNER}" \
+            -var="github_repo=${REPO_NAME}"
+          terraform output

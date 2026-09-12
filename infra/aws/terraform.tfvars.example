@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars locally. Do not commit terraform.tfvars.
+
+aws_region        = "eu-north-1"
+github_org        = "AhtishamHussain"
+github_repo       = "PairDrop"
+instance_type     = "t3.micro"
+desired_capacity  = 1
+max_size          = 1
+budget_limit      = "8"
+alert_email       = ""
+domain            = ""
+acme_email        = ""

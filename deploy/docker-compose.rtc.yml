@@ -1,0 +1,6 @@
+services:
+  pairdrop:
+    environment:
+      RTC_CONFIG: /opt/rtc_config.json
+    volumes:
+      - /opt/pairdrop/rtc_config.json:/opt/rtc_config.json:ro

@@ -1,0 +1,45 @@
+#!/bin/bash
+set -euxo pipefail
+
+dnf -y update
+dnf -y install docker awscli python3 curl git
+systemctl enable --now docker
+usermod -aG docker ec2-user
+
+mkdir -p /usr/local/lib/docker/cli-plugins
+curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.7/docker-compose-linux-x86_64" -o /usr/local/lib/docker/cli-plugins/docker-compose
+chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
+TOKEN="$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')"
+INSTANCE_ID="$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)"
+aws ec2 associate-address --region "${region}" --instance-id "$INSTANCE_ID" --allocation-id "${eip_allocation_id}" --allow-reassociation || true
+
+rm -rf /tmp/pairdrop-src
+git clone --depth 1 --branch master "https://github.com/${github_org}/${github_repo}.git" /tmp/pairdrop-src
+mkdir -p /opt/pairdrop
+cp /tmp/pairdrop-src/deploy/docker-compose.yml /opt/pairdrop/
+cp /tmp/pairdrop-src/deploy/docker-compose.rtc.yml /opt/pairdrop/
+cp /tmp/pairdrop-src/deploy/update.sh /opt/pairdrop/
+cp /tmp/pairdrop-src/deploy/Caddyfile /opt/pairdrop/
+chmod 700 /opt/pairdrop/update.sh
+rm -rf /tmp/pairdrop-src
+
+if [ -n "${domain}" ]; then
+  cat > /opt/pairdrop/Caddyfile << EOF
+${domain} {
+	encode gzip
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		-Server
+	}
+	reverse_proxy pairdrop:3000 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Real-IP {remote_host}
+	}
+}
+EOF
+fi
